@@ -1,0 +1,218 @@
+{
+  "_comment": "Company Troubleshooting Knowledge Base — mock data for the Triage Agent tool.",
+  "_version": "1.0.0",
+  "_note": "Add new entries following the same schema. The agent will search by error_code and keyword matching.",
+
+  "entries": [
+
+    {
+      "id": "http-500",
+      "title": "HTTP 500 – Internal Server Error",
+      "error_codes": ["500"],
+      "keywords": ["internal server error", "unhandled exception", "crash", "panic", "null pointer", "stack trace"],
+      "description": "A catch-all for any server-side failure that doesn't map to a more specific error code.",
+      "common_causes": [
+        "Unhandled exception in application code",
+        "Out-of-memory (OOM) kill — container was evicted",
+        "Database connection pool exhausted",
+        "Downstream service timeout bubbled up",
+        "Misconfigured environment variable (missing secret)"
+      ],
+      "action_items": [
+        "Check application logs: kubectl logs <pod> --previous",
+        "Inspect OOMKill events: kubectl describe pod <pod>",
+        "Verify database connectivity from within the pod",
+        "Review recent deployments for config or code changes",
+        "Escalate to Senior Dev if root cause is not identified within 30 min"
+      ],
+      "confidence_boost": 10,
+      "severity": "high"
+    },
+
+    {
+      "id": "http-503",
+      "title": "HTTP 503 – Service Unavailable",
+      "error_codes": ["503"],
+      "keywords": ["service unavailable", "no healthy upstream", "circuit breaker", "overloaded", "not ready"],
+      "description": "The service cannot handle the request, typically because it is down, overloaded, or mid-restart.",
+      "common_causes": [
+        "All pods are in CrashLoopBackOff or Pending state",
+        "Readiness probe failing — pod exists but not receiving traffic",
+        "HPA has not yet scaled up to handle a traffic spike",
+        "Upstream dependency (cache, DB, third-party API) is down",
+        "Node pressure causing pod eviction"
+      ],
+      "action_items": [
+        "Check pod status: kubectl get pods -n <namespace>",
+        "Inspect readiness probe: kubectl describe pod <pod>",
+        "Check HPA status: kubectl get hpa",
+        "Verify upstream services are healthy",
+        "Restart Deployment if pods are stuck: kubectl rollout restart deployment/<name>"
+      ],
+      "confidence_boost": 10,
+      "severity": "critical"
+    },
+
+    {
+      "id": "http-403",
+      "title": "HTTP 403 – Forbidden",
+      "error_codes": ["403"],
+      "keywords": ["forbidden", "access denied", "unauthorized", "permission denied", "rbac", "iam", "policy"],
+      "description": "The client is authenticated but lacks the permission to perform the requested action.",
+      "common_causes": [
+        "Expired or revoked API token / certificate",
+        "Missing or incorrect RBAC role binding in Kubernetes",
+        "IAM policy change that removed a required permission",
+        "Wrong service account attached to the Pod",
+        "IP allowlist or network policy blocking the source"
+      ],
+      "action_items": [
+        "Verify the token / credential is valid and not expired",
+        "Review RBAC: kubectl auth can-i <verb> <resource> --as=system:serviceaccount:<ns>:<sa>",
+        "Check recent IAM / policy changes in audit logs",
+        "Confirm the correct ServiceAccount is mounted in the Pod spec",
+        "Do NOT restart the pod — this is an auth issue, not a process issue"
+      ],
+      "confidence_boost": 15,
+      "severity": "medium"
+    },
+
+    {
+      "id": "http-401",
+      "title": "HTTP 401 – Unauthorized",
+      "error_codes": ["401"],
+      "keywords": ["unauthorized", "invalid token", "jwt expired", "authentication failed", "no credentials"],
+      "description": "The request lacks valid authentication credentials.",
+      "common_causes": [
+        "JWT token has expired (check exp claim)",
+        "Wrong audience (aud) or issuer (iss) in token",
+        "Secret rotation completed but pod still holds old token",
+        "Kubernetes Secret not correctly mounted or projected"
+      ],
+      "action_items": [
+        "Decode and inspect the JWT: jwt.io or `kubectl exec` into pod",
+        "Rotate the secret and trigger a rolling restart of affected pods",
+        "Verify the Secret is correctly referenced in the Deployment env vars",
+        "Check identity provider / OAuth2 issuer logs for clues"
+      ],
+      "confidence_boost": 15,
+      "severity": "medium"
+    },
+
+    {
+      "id": "http-404",
+      "title": "HTTP 404 – Not Found",
+      "error_codes": ["404"],
+      "keywords": ["not found", "missing route", "endpoint does not exist", "resource not found"],
+      "description": "The requested resource or route does not exist on the server.",
+      "common_causes": [
+        "Typo in the URL or incorrect API version prefix",
+        "Service route removed or renamed in a recent deployment",
+        "Ingress / route rule misconfiguration",
+        "Feature flag disabled the endpoint"
+      ],
+      "action_items": [
+        "Confirm the correct endpoint path in the API documentation",
+        "Check Ingress / Route rules: kubectl get ingress -n <namespace>",
+        "Review recent deployment diff for removed routes",
+        "Verify feature flags if your platform supports them"
+      ],
+      "confidence_boost": 5,
+      "severity": "low"
+    },
+
+    {
+      "id": "db-connection-refused",
+      "title": "Database Connection Refused",
+      "error_codes": ["500", "503"],
+      "keywords": ["connection refused", "db", "database", "postgres", "mysql", "mongo", "redis", "could not connect", "econnrefused", "dial tcp"],
+      "description": "The application cannot establish a TCP connection to the database.",
+      "common_causes": [
+        "Database pod / StatefulSet is down or being rescheduled",
+        "Wrong DB_HOST or DB_PORT in application config",
+        "Network Policy blocking egress from app pod to DB pod",
+        "Database connection pool limit reached (max_connections exceeded)",
+        "Database volume is full (no space left on device)"
+      ],
+      "action_items": [
+        "Check DB pod status: kubectl get pods -l app=<db-label> -n <namespace>",
+        "Test connectivity from app pod: kubectl exec -it <pod> -- nc -zv <db-host> <db-port>",
+        "Verify DB_HOST / DB_PORT env vars in the app deployment",
+        "Review NetworkPolicy objects for egress rules",
+        "Check DB logs for connection limit errors or disk-full messages"
+      ],
+      "confidence_boost": 20,
+      "severity": "critical"
+    },
+
+    {
+      "id": "oom-kill",
+      "title": "Out-of-Memory (OOMKilled)",
+      "error_codes": ["500"],
+      "keywords": ["oomkill", "oom", "out of memory", "memory limit", "killed", "exit code 137", "evicted"],
+      "description": "The container exceeded its memory limit and was terminated by the Linux kernel OOM killer.",
+      "common_causes": [
+        "Memory limit set too low for the workload",
+        "Memory leak in application code",
+        "Unexpected traffic spike causing heap growth",
+        "Large payload being buffered entirely in memory"
+      ],
+      "action_items": [
+        "Confirm OOMKill: kubectl describe pod <pod> | grep -i oom",
+        "Review memory usage trends in Prometheus / Grafana",
+        "Temporarily increase memory limit in the Deployment spec",
+        "Profile the application for memory leaks (pprof, py-spy, etc.)",
+        "Implement streaming/pagination to avoid large in-memory buffers"
+      ],
+      "confidence_boost": 20,
+      "severity": "high"
+    },
+
+    {
+      "id": "timeout",
+      "title": "Request Timeout / Gateway Timeout",
+      "error_codes": ["504", "408", "500"],
+      "keywords": ["timeout", "timed out", "gateway timeout", "deadline exceeded", "context deadline", "read timeout", "write timeout"],
+      "description": "A request exceeded the configured time limit somewhere in the call chain.",
+      "common_causes": [
+        "Slow downstream service (DB query, external API)",
+        "Pod CPU throttling — request processing is starved",
+        "Large synchronous payload — should be async",
+        "Kubernetes liveness probe timeout too aggressive, causing restart loop"
+      ],
+      "action_items": [
+        "Identify the slowest span using distributed tracing (Jaeger / Tempo)",
+        "Check CPU throttling: kubectl top pods -n <namespace>",
+        "Review and tune timeout values in Ingress / service mesh config",
+        "Consider moving long-running work to an async queue (e.g. Kafka, SQS)",
+        "Escalate to Senior Dev if the bottleneck is in a third-party service"
+      ],
+      "confidence_boost": 10,
+      "severity": "high"
+    },
+
+    {
+      "id": "crash-loop",
+      "title": "CrashLoopBackOff",
+      "error_codes": [],
+      "keywords": ["crashloopbackoff", "crash loop", "container keeps restarting", "restartcount", "back-off restarting"],
+      "description": "Kubernetes is repeatedly restarting a container because it exits immediately after starting.",
+      "common_causes": [
+        "Application fails startup due to missing required environment variable",
+        "Liveness probe too aggressive — kills pod before it is ready",
+        "Application crash on startup (bad config file, missing secret)",
+        "Image entrypoint / CMD is wrong"
+      ],
+      "action_items": [
+        "Read crash logs: kubectl logs <pod> --previous",
+        "Describe the pod for probe and event details: kubectl describe pod <pod>",
+        "Check all required env vars are present (compare .env.example vs ConfigMap/Secret)",
+        "Temporarily set restartPolicy to Never to capture the full crash output",
+        "Escalate to Senior Dev with full logs if the exit code is non-obvious"
+      ],
+      "confidence_boost": 20,
+      "severity": "critical"
+    }
+
+  ]
+}

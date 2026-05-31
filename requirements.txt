@@ -1,0 +1,16 @@
+# ── Web framework ─────────────────────────────────────────────────────────────
+fastapi==0.115.5
+uvicorn[standard]==0.32.1    # ASGI server with WebSocket & HTTP/2 support
+
+# ── Data validation ───────────────────────────────────────────────────────────
+pydantic==2.10.3
+pydantic-settings==2.6.1     # reads config from env vars / .env files
+
+# ── LLM client ────────────────────────────────────────────────────────────────
+openai==1.57.2               # official Python SDK — supports async, tool-calling
+
+# ── HTTP client (used internally by openai SDK) ───────────────────────────────
+httpx==0.28.1
+
+# ── Observability ─────────────────────────────────────────────────────────────
+prometheus-fastapi-instrumentator==7.0.0
