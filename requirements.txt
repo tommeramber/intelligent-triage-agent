@@ -1,0 +1,20 @@
+# ── Web framework ─────────────────────────────────────────────────────────────
+fastapi==0.115.5
+uvicorn[standard]==0.32.1    # ASGI server with WebSocket & HTTP/2 support
+
+# ── Data validation ───────────────────────────────────────────────────────────
+pydantic==2.11.0              # mcp>=1.27 requires pydantic>=2.11
+pydantic-settings==2.6.1     # reads config from env vars / .env files
+
+# ── MCP (stdio KB + hardened in-cluster K8s MCP) ───────────────────────────────
+mcp==1.27.2
+kubernetes==31.0.0
+
+# ── LLM client ────────────────────────────────────────────────────────────────
+openai==1.109.1              # >=1.65 required for pydantic>=2.11 (MCP); fixes models.list() parse
+
+# ── HTTP client (used internally by openai SDK) ───────────────────────────────
+httpx==0.28.1
+
+# ── Observability ─────────────────────────────────────────────────────────────
+prometheus-fastapi-instrumentator==7.0.0

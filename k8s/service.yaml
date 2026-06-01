@@ -1,0 +1,64 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: triage-agent-svc
+  namespace: triage-agent
+  labels:
+    app.kubernetes.io/name: triage-agent
+    app.kubernetes.io/component: service
+spec:
+  # ClusterIP means the service is only reachable inside the cluster.
+  # For external access, use the Ingress below (or NodePort if you don't have an Ingress controller).
+  type: ClusterIP
+  selector:
+    app: triage-agent
+  ports:
+    - name: http
+      port: 80          # the port clients use
+      targetPort: 8080  # the port the container listens on
+      protocol: TCP
+
+---
+# Ingress — exposes the service externally via an Ingress controller.
+# Works with nginx-ingress, Traefik, and OpenShift Routes (add the route separately).
+#
+# For Minikube:  minikube addons enable ingress
+# For OpenShift: replace this with an OpenShift Route (see docs/openshift-route.yaml comment)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: triage-agent-ingress
+  namespace: triage-agent
+  labels:
+    app.kubernetes.io/name: triage-agent
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    # Uncomment to enable TLS termination at the Ingress (Phase 2):
+    # nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    # cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    # ── Phase 2: Rate Limiting ────────────────────────────────────────────────
+    # Uncomment to enable per-client-IP rate limiting at the Ingress level.
+    # Protects against API abuse and runaway OpenAI billing.
+    # No application code changes required — purely infrastructure.
+    #
+    # nginx.ingress.kubernetes.io/limit-rps: "10"           # max 10 req/sec per IP
+    # nginx.ingress.kubernetes.io/limit-connections: "5"    # max 5 concurrent connections per IP
+    # nginx.ingress.kubernetes.io/limit-burst-multiplier: "3"  # allow burst up to 30 req/sec briefly
+spec:
+  ingressClassName: nginx   # change to "openshift-default" or your controller name
+  rules:
+    - host: triage-agent.local   # add to /etc/hosts: <minikube-ip> triage-agent.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: triage-agent-svc
+                port:
+                  number: 80
+  # Uncomment + configure cert-manager for TLS (Phase 2):
+  # tls:
+  #   - hosts:
+  #       - triage-agent.local
+  #     secretName: triage-agent-tls

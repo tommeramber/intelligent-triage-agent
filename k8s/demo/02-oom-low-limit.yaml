@@ -1,0 +1,37 @@
+# Scenario 2: OOMKilled — memory limit too low for the workload.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker-oom
+  namespace: triage-demo
+  labels:
+    app: worker-oom
+    triage.demo/scenario: oom-low-limit
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: worker-oom
+  template:
+    metadata:
+      labels:
+        app: worker-oom
+        triage.demo/scenario: oom-low-limit
+    spec:
+      containers:
+        - name: worker
+          image: python:3.12-alpine
+          command:
+            - python
+            - -c
+            - |
+              blocks = []
+              print("allocating memory until OOMKilled", flush=True)
+              while True:
+                  blocks.append(b"x" * (1024 * 1024))
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 48Mi

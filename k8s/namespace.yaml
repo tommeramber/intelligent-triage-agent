@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: triage-agent
+  labels:
+    app.kubernetes.io/name: triage-agent
+    # Kubernetes Pod Security Standards — enforce the "restricted" profile.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+  annotations:
+    openshift.io/description: "Triage Agent namespace — SCC restricted"
+

@@ -1,0 +1,143 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: triage-agent
+  namespace: triage-agent
+  labels:
+    app.kubernetes.io/name: triage-agent
+    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/component: api
+spec:
+  # Start with 2 replicas for basic HA.
+  # The HPA (hpa.yaml) will scale this up/down automatically under load.
+  replicas: 2
+
+  selector:
+    matchLabels:
+      app: triage-agent
+
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Allow up to 1 extra pod during rollout, never go below 1 available.
+      maxSurge: 1
+      maxUnavailable: 0
+
+  template:
+    metadata:
+      labels:
+        app: triage-agent
+        app.kubernetes.io/name: triage-agent
+        app.kubernetes.io/version: "1.0.0"
+      annotations:
+        # Forces a rolling restart when the ConfigMap or Secret changes.
+        # Replace the timestamp with: kubectl annotate pod ...
+        # or let the Makefile target handle it.
+        kubectl.kubernetes.io/restartedAt: "2024-01-01T00:00:00Z"
+
+    spec:
+      # Use a dedicated ServiceAccount (least-privilege principle).
+      serviceAccountName: triage-agent-sa
+      # Mount token for in-cluster K8s MCP (RBAC is namespace-scoped via RoleBindings).
+      automountServiceAccountToken: true
+
+      # Pod-level security: run as non-root, drop all Linux capabilities.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+        - name: triage-agent
+          # For Minikube with Podman: use localhost/ prefix (minikube image load stores under localhost/)
+          # For production: replace with your registry, e.g. quay.io/myorg/triage-agent:1.0.0
+          image: localhost/intelligent-triage-agent:latest
+          imagePullPolicy: IfNotPresent   # use Always for production with a real registry
+
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+              name: http
+
+          # Container-level security: read-only root filesystem, no privilege escalation.
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+          # Load non-sensitive config from ConfigMap
+          envFrom:
+            - configMapRef:
+                name: triage-agent-config
+
+          # Load the API key from the Secret as an individual env var
+          env:
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: triage-agent-secret
+                  key: OPENAI_API_KEY
+
+          # Mount the knowledge base from ConfigMap as a file
+          volumeMounts:
+            - name: kb-volume
+              mountPath: /app/data
+              readOnly: true
+            # Writable tmp dir needed because readOnlyRootFilesystem=true
+            # Python needs /tmp for certain internal operations.
+            - name: tmp
+              mountPath: /tmp
+
+          # Resource limits: crucial for cluster stability and HPA accuracy.
+          # These values are tuned for a lightweight FastAPI app calling an external LLM.
+          resources:
+            requests:
+              cpu: "100m"      # 0.1 vCPU — enough for idle + API overhead
+              memory: "128Mi"
+            limits:
+              cpu: "500m"      # burst up to 0.5 vCPU during LLM response parsing
+              memory: "256Mi"
+
+          # Readiness probe hits /health/ready which validates the OpenAI API key.
+          # If OpenAI is unreachable, this pod stops receiving traffic (graceful degradation).
+          # NOT used for liveness — an OpenAI outage should never cause pod restarts.
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 8080
+            initialDelaySeconds: 10    # give app time to start before first check
+            periodSeconds: 30          # every 30s — keeps OpenAI API call rate low
+            failureThreshold: 2        # mark unready after 2 consecutive failures
+            timeoutSeconds: 10         # OpenAI call may take a few seconds
+
+          # Liveness probe: pod is restarted if this fails.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            failureThreshold: 3
+
+      volumes:
+        - name: kb-volume
+          configMap:
+            name: triage-kb
+        - name: tmp
+          emptyDir: {}
+
+      # Spread pods across nodes/zones for HA.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: triage-agent
+
+      # Tolerate node maintenance evictions gracefully.
+      terminationGracePeriodSeconds: 30

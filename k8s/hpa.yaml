@@ -1,0 +1,65 @@
+# ── Prerequisites ─────────────────────────────────────────────────────────────
+# HPA is a built-in Kubernetes resource (autoscaling/v2) — no operator needed.
+# It is part of the kube-controller-manager and ships with every standard K8s distro.
+#
+# However, HPA requires Metrics Server to read CPU/memory usage from pods.
+# Metrics Server is NOT always pre-installed:
+#
+#   Minikube:   NOT installed by default → run: minikube addons enable metrics-server
+#               Or use the Makefile:       make minikube-setup
+#   OpenShift:  Built-in — ships with the platform, no action needed.
+#   GKE/EKS/AKS: Pre-installed on managed clusters.
+#   Vanilla kubeadm: kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+#
+# Without Metrics Server: the HPA object applies fine but shows <unknown> for
+# current metrics and will not scale. Pods still run — autoscaling just won't work.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Horizontal Pod Autoscaler
+# Scales the Deployment between 2 and 10 replicas based on CPU usage.
+#
+# Why CPU? The agent's CPU spikes while parsing and processing LLM responses.
+# This is a good leading indicator of saturation for this workload.
+#
+# Phase 2: add custom metrics (e.g. request queue depth via KEDA)
+# for more accurate LLM-latency-aware scaling.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: triage-agent-hpa
+  namespace: triage-agent
+  labels:
+    app.kubernetes.io/name: triage-agent
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: triage-agent
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60   # scale up when average CPU > 60%
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 75   # also scale on memory pressure
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 30   # react quickly to traffic spikes
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300  # wait 5 min before scaling down (avoids flapping)
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120

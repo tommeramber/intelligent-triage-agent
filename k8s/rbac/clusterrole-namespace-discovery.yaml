@@ -1,0 +1,12 @@
+# Narrow cluster scope: discover opted-in namespaces by label (metadata only, no secrets).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: triage-agent-namespace-discovery
+  labels:
+    app.kubernetes.io/name: triage-agent
+    app.kubernetes.io/component: rbac
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch"]

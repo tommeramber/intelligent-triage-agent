@@ -1,0 +1,15 @@
+{
+  "_comment": "Reference configuration — the app reads MCP settings from env vars (see .env.example).",
+  "kb": {
+    "transport": "stdio",
+    "command": "python3",
+    "args": ["-m", "mcp_servers.kb_server"],
+    "note": "Spawned inside the triage-agent container; not a separate Deployment."
+  },
+  "kubernetes": {
+    "transport": "stdio",
+    "command": "python3",
+    "args": ["-m", "mcp_servers.k8s_server"],
+    "note": "Hardened in-cluster mode: pod ServiceAccount + namespace-scoped RBAC + label opt-in."
+  }
+}
