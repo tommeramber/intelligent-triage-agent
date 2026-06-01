@@ -38,6 +38,8 @@ spec:
     spec:
       # Use a dedicated ServiceAccount (least-privilege principle).
       serviceAccountName: triage-agent-sa
+      # Mount token for in-cluster K8s MCP (RBAC is namespace-scoped via RoleBindings).
+      automountServiceAccountToken: true
 
       # Pod-level security: run as non-root, drop all Linux capabilities.
       securityContext:

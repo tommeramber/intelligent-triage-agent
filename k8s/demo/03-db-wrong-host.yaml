@@ -1,0 +1,89 @@
+# Scenario 3: DB connection failure — wrong Service DNS name.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: triage-demo
+  labels:
+    app: postgres
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: triage-demo
+  labels:
+    app: postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          env:
+            - name: POSTGRES_PASSWORD
+              value: demo
+            - name: POSTGRES_USER
+              value: demo
+            - name: POSTGRES_DB
+              value: demo
+          ports:
+            - containerPort: 5432
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app-wrong-db-host
+  namespace: triage-demo
+  labels:
+    app: app-wrong-db-host
+    triage.demo/scenario: db-wrong-host
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: app-wrong-db-host
+  template:
+    metadata:
+      labels:
+        app: app-wrong-db-host
+        triage.demo/scenario: db-wrong-host
+    spec:
+      containers:
+        - name: app
+          image: busybox:1.36
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "connecting to postgres-wrong.triage-demo.svc.cluster.local:5432"
+              while true; do
+                nc -zv -w 2 postgres-wrong.triage-demo.svc.cluster.local 5432 \
+                  || echo "DB connection refused / host not found"
+                sleep 10
+              done
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 32Mi

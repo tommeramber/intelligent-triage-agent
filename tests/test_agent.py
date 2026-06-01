@@ -13,7 +13,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.tools import get_troubleshooting_docs
+from app.kb.search import get_troubleshooting_docs
+from app.kb.search import OPENAI_KB_TOOL_SCHEMA
 from app.models import TriageRequest, TriageResponse
 
 
@@ -101,6 +102,34 @@ class TestModels:
 
 # ── Agent integration test (mocked OpenAI) ───────────────────────────────────
 
+class _FakeMcpHub:
+    """Minimal hub stub so agent tests do not spawn MCP subprocesses."""
+
+    kb_available = True
+    k8s_available = False
+    k8s_error = None
+
+    def classify_tool(self, tool_name):
+        if tool_name == "get_troubleshooting_docs":
+            return ("knowledge_base", "mcp")
+        return None
+
+    def kb_tool_schemas(self):
+        return [OPENAI_KB_TOOL_SCHEMA]
+
+    def all_tool_schemas(self):
+        return self.kb_tool_schemas()
+
+    async def call_tool(self, tool_name, arguments):
+        import json as _json
+
+        result = get_troubleshooting_docs(
+            error_code=arguments.get("error_code", ""),
+            description=arguments.get("description", ""),
+        )
+        return _json.dumps(result)
+
+
 @pytest.mark.asyncio
 async def test_run_triage_happy_path():
     """
@@ -148,12 +177,136 @@ async def test_run_triage_happy_path():
     mock_client.chat.completions.create = AsyncMock(side_effect=[tool_call_response, final_response])
 
     # Pass mock client directly — no need to patch AsyncOpenAI constructor
-    result = await run_triage("500", "DB connection refused to postgres:5432", client=mock_client)
+    result = await run_triage(
+        "500",
+        "DB connection refused to postgres:5432",
+        client=mock_client,
+        mcp_hub=_FakeMcpHub(),
+    )
 
     assert isinstance(result, TriageResponse)
     assert result.confidence_score == 90
     assert "Check DB pod status" in result.action_items
     assert result.raw_error == "500: DB connection refused to postgres:5432"
+    assert result.evidence_sources.knowledge_base == "mcp"
+    assert result.evidence_sources.kubernetes == []
+
+
+class _FakeMcpHubWithK8s(_FakeMcpHub):
+    """Hub stub that exposes a second tool like the in-cluster K8s MCP server."""
+
+    k8s_available = True
+
+    def classify_tool(self, tool_name):
+        if tool_name == "list_pods":
+            return ("kubernetes", tool_name)
+        return super().classify_tool(tool_name)
+
+    def all_tool_schemas(self):
+        schemas = super().all_tool_schemas()
+        schemas.append({
+            "type": "function",
+            "function": {
+                "name": "list_pods",
+                "description": "List pods in a namespace",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"namespace": {"type": "string"}},
+                    "required": ["namespace"],
+                },
+            },
+        })
+        return schemas
+
+    async def call_tool(self, tool_name, arguments):
+        import json as _json
+
+        if tool_name == "list_pods":
+            return _json.dumps({"namespace": arguments.get("namespace"), "pods": []})
+        return await super().call_tool(tool_name, arguments)
+
+
+@pytest.mark.asyncio
+async def test_run_triage_reserves_last_iteration_for_final_answer(monkeypatch):
+    """
+    With AGENT_MAX_ITERATIONS=3, KB + one K8s tool call must still yield a triage
+    response (final iteration must not offer tools).
+    """
+    from app.agent import run_triage
+
+    monkeypatch.setattr("app.agent.settings.agent_max_iterations", 3)
+
+    def _tool_round(name: str, args: str, call_id: str):
+        tc = MagicMock()
+        tc.id = call_id
+        tc.function.name = name
+        tc.function.arguments = args
+        response = MagicMock()
+        response.choices[0].finish_reason = "tool_calls"
+        response.choices[0].message.content = None
+        response.choices[0].message.tool_calls = [tc]
+        response.choices[0].message.model_dump.return_value = {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": call_id,
+                    "function": {"name": name, "arguments": args},
+                }
+            ],
+        }
+        return response
+
+    kb_round = _tool_round(
+        "get_troubleshooting_docs",
+        '{"error_code": "500", "description": "db connection refused"}',
+        "call_kb",
+    )
+    k8s_round = _tool_round(
+        "list_pods",
+        '{"namespace": "triage-demo"}',
+        "call_k8s",
+    )
+
+    final_answer = {
+        "summary": "Database connection refused — postgres is unreachable from the app pod.",
+        "confidence_score": 88,
+        "action_items": ["Check DB pod status", "Verify DB_HOST env var"],
+        "docs_consulted": ["Database Connection Refused"],
+    }
+    final_response = MagicMock()
+    final_response.choices[0].finish_reason = "stop"
+    final_response.choices[0].message.content = json.dumps(final_answer)
+    final_response.choices[0].message.tool_calls = None
+    final_response.choices[0].message.model_dump.return_value = {
+        "role": "assistant",
+        "content": json.dumps(final_answer),
+    }
+
+    mock_mod_result = MagicMock()
+    mock_mod_result.results[0].flagged = False
+
+    mock_client = MagicMock()
+    mock_client.moderations.create = AsyncMock(return_value=mock_mod_result)
+    mock_client.chat.completions.create = AsyncMock(
+        side_effect=[kb_round, k8s_round, final_response]
+    )
+
+    result = await run_triage(
+        "500",
+        "DB connection refused to postgres:5432",
+        client=mock_client,
+        mcp_hub=_FakeMcpHubWithK8s(),
+    )
+
+    assert result.confidence_score == 88
+    assert "postgres" in result.summary.lower()
+    assert result.evidence_sources.knowledge_base == "mcp"
+    assert result.evidence_sources.kubernetes == ["list_pods"]
+    assert len(result.docs_consulted) > 0
+
+    create_calls = mock_client.chat.completions.create.await_args_list
+    assert len(create_calls) == 3
+    assert "tools" not in create_calls[-1].kwargs
 
 
 # ── Moderation tests ──────────────────────────────────────────────────────────

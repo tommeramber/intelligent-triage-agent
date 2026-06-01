@@ -23,9 +23,10 @@ WORKDIR /app
 # Copy installed packages from builder
 COPY --from=builder /install /usr/local
 
-# Copy application source
-COPY app/   ./app/
-COPY data/  ./data/
+# Copy application source (KB MCP server runs in-process via stdio subprocess)
+COPY app/          ./app/
+COPY mcp_servers/  ./mcp_servers/
+COPY data/         ./data/
 
 # Switch to non-root user BEFORE the CMD
 USER appuser

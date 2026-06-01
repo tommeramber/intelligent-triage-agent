@@ -1,0 +1,40 @@
+# Scenario 1: CrashLoopBackOff — container exits because required config is missing.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-missing-config
+  namespace: triage-demo
+  labels:
+    app: api-missing-config
+    triage.demo/scenario: crashloop-missing-config
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: api-missing-config
+  template:
+    metadata:
+      labels:
+        app: api-missing-config
+        triage.demo/scenario: crashloop-missing-config
+    spec:
+      containers:
+        - name: api
+          image: busybox:1.36
+          command:
+            - /bin/sh
+            - -c
+            - |
+              if [ -z "$REQUIRED_CONFIG" ]; then
+                echo "FATAL: REQUIRED_CONFIG is not set — refusing to start"
+                exit 1
+              fi
+              echo "started with config=$REQUIRED_CONFIG"
+              sleep 3600
+          # REQUIRED_CONFIG intentionally omitted → CrashLoopBackOff
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 32Mi

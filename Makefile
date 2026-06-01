@@ -12,6 +12,8 @@ IMAGE_TAG    ?= $(shell date +%Y%m%d-%H%M)
 REGISTRY     ?=                     # e.g. quay.io/myorg  — set via env or CLI arg: make push REGISTRY=quay.io/myorg
 NAMESPACE    ?= triage-agent
 K8S_DIR      := k8s
+# Demo pins HPA min=max so rollouts stay at a fixed replica count (HPA object remains).
+DEMO_HPA_REPLICAS ?= 2
 # Python 3.12 required — pydantic-core wheels are not yet available for 3.13/3.14.
 # The Dockerfile uses python:3.12-slim for the same reason.
 PYTHON       := $(shell command -v python3.12 2>/dev/null || echo python3)
@@ -42,22 +44,29 @@ help:
 	@echo "    make push           Push image to REGISTRY (set REGISTRY=...)"
 	@echo "    make shell          Open a shell inside the running container"
 	@echo ""
-	@echo "  Kubernetes"
-	@echo "    make deploy-minikube  Full Minikube deploy in one command (setup → build → load → apply → status)"
+	@echo "  Kubernetes / demo"
+	@echo "    make demo-up          One-command Minikube demo (agent + RBAC + demo workloads)"
+	@echo "    make deploy-minikube  Alias for make demo-up"
 	@echo "    make minikube-setup      Enable required Minikube addons (ingress + metrics-server) — run once before k8s-apply"
 	@echo "    make minikube-load       Save + load image into Minikube (Podman-compatible; alternative to eval \$\$(minikube docker-env))"
 	@echo "    make minikube-load-sudo  Load image using sudo $(CONTAINER_TOOL) — use when image was built with sudo podman"
-	@echo "    make k8s-apply      Apply all manifests (namespace → service account → config → deploy)  [run make minikube-setup first]"
+	@echo "    make k8s-apply      Apply agent manifests + RBAC cluster roles  [run make minikube-setup first]"
+	@echo "    make k8s-rbac       Apply cluster-scoped RBAC for namespace discovery"
+	@echo "    make k8s-sync-access  RoleBindings in labeled namespaces + allowlist ConfigMap"
 	@echo "    make k8s-secret     Create the OpenAI secret from OPENAI_API_KEY env var"
 	@echo "    make k8s-kb         Update the knowledge-base ConfigMap from local JSON"
 	@echo "    make k8s-restart    Rolling-restart the Deployment"
 	@echo "    make k8s-status     Show pod / deployment / HPA status"
+	@echo "    make k8s-hpa-unfreeze  Restore HPA min=2 max=10 after demo (re-applies hpa.yaml)"
 	@echo "    make k8s-logs       Tail logs from all pods"
 	@echo "    make k8s-delete     Delete all resources in the namespace"
 	@echo "    make k8s-forward    Port-forward the service to localhost:$(PORT)"
+	@echo "    make demo-apply     Apply triage-demo incident workloads (Minikube)"
+	@echo "    make demo-delete    Remove triage-demo namespace"
+	@echo "    make demo-validate  Dry-run validate demo manifests"
 	@echo ""
 	@echo "  Misc"
-	@echo "    make smoke-test     POST a sample error log to the running service"
+	@echo "    make smoke-test-all   Run POST /triage demos (prints payload, response, MCP/tools each)"
 	@echo "    make clean          Remove build artefacts and venv"
 	@echo ""
 	@echo "  Variables (override on CLI or in env):"
@@ -133,8 +142,23 @@ minikube-load-sudo:
 	minikube image ls | grep $(IMAGE_NAME) || echo "WARNING: image not found in minikube — check the load step"
 	@echo "✓ Done"
 
+.PHONY: k8s-rbac
+k8s-rbac:
+	@echo "→ Applying cluster RBAC (read-only workload role + namespace discovery)…"
+	kubectl apply -f $(K8S_DIR)/rbac/clusterrole-workload-read.yaml
+	kubectl apply -f $(K8S_DIR)/rbac/clusterrole-namespace-discovery.yaml
+	kubectl apply -f $(K8S_DIR)/rbac/clusterrolebinding-namespace-discovery.yaml
+
+.PHONY: k8s-sync-access
+k8s-sync-access:
+	@chmod +x $(K8S_DIR)/rbac/sync-rolebindings.sh
+	$(K8S_DIR)/rbac/sync-rolebindings.sh
+	@echo "→ Restarting agent to pick up allowlist ConfigMap…"
+	kubectl rollout restart deployment/triage-agent -n $(NAMESPACE)
+	kubectl rollout status deployment/triage-agent -n $(NAMESPACE) --timeout=180s
+
 .PHONY: k8s-apply
-k8s-apply:
+k8s-apply: k8s-rbac
 	@echo "→ Applying Kubernetes manifests…"
 	kubectl apply -f $(K8S_DIR)/namespace.yaml
 	@echo "→ Creating/updating OpenAI secret…"
@@ -149,6 +173,17 @@ k8s-apply:
 	@echo ""
 	@echo "→ Waiting for rollout…"
 	kubectl rollout status deployment/triage-agent -n $(NAMESPACE) --timeout=180s
+
+.PHONY: k8s-hpa-freeze-demo
+k8s-hpa-freeze-demo:
+	@echo "→ Pinning HPA to $(DEMO_HPA_REPLICAS) replicas (demo-stable rollout; object kept)…"
+	kubectl patch hpa triage-agent-hpa -n $(NAMESPACE) --type=merge \
+		-p '{"spec":{"minReplicas":$(DEMO_HPA_REPLICAS),"maxReplicas":$(DEMO_HPA_REPLICAS)}}'
+
+.PHONY: k8s-hpa-unfreeze
+k8s-hpa-unfreeze:
+	@echo "→ Restoring HPA scaling from $(K8S_DIR)/hpa.yaml (min=2, max=10)…"
+	kubectl apply -f $(K8S_DIR)/hpa.yaml
 
 .PHONY: k8s-secret
 k8s-secret: _require-apikey
@@ -202,54 +237,103 @@ k8s-forward:
 	@echo "→ Forwarding service to http://localhost:$(PORT)"
 	kubectl port-forward svc/triage-agent-svc $(PORT):80 -n $(NAMESPACE)
 
-.PHONY: deploy-minikube
-deploy-minikube:
-	$(eval _TAG     := $(shell date +%Y%m%d-%H%M))
-	$(eval _API_KEY := $(or $(OPENAI_API_KEY),$(shell grep '^OPENAI_API_KEY=' .env 2>/dev/null | cut -d= -f2)))
+.PHONY: demo-apply
+demo-apply:
+	@echo "→ Applying triage-demo workloads…"
+	kubectl apply -f k8s/demo/namespace.yaml
+	kubectl apply -f k8s/demo/
+
+.PHONY: demo-delete
+demo-delete:
+	kubectl delete namespace triage-demo --ignore-not-found
+
+.PHONY: demo-validate
+demo-validate:
+	@echo "→ Validating demo manifests (client dry-run)…"
+	kubectl apply --dry-run=client -f k8s/demo/namespace.yaml
+	kubectl apply --dry-run=client -f k8s/demo/
+
+.PHONY: _preflight-demo
+_preflight-demo:
+	@command -v minikube >/dev/null 2>&1 || (echo "ERROR: minikube not found in PATH" && exit 1)
+	@command -v kubectl >/dev/null 2>&1 || (echo "ERROR: kubectl not found in PATH" && exit 1)
+	@command -v $(CONTAINER_TOOL) >/dev/null 2>&1 || (echo "ERROR: $(CONTAINER_TOOL) not found" && exit 1)
+	@$(eval _API_KEY := $(or $(OPENAI_API_KEY),$(shell grep '^OPENAI_API_KEY=' .env 2>/dev/null | cut -d= -f2)))
 	@[ -n "$(_API_KEY)" ] || (echo "ERROR: OPENAI_API_KEY not found. Set it in .env or export it." && exit 1)
 	@echo "$(_API_KEY)" | grep -q "^sk-your" && (echo "ERROR: OPENAI_API_KEY is still the placeholder. Edit .env with your real key." && exit 1) || true
+
+.PHONY: minikube-ensure
+minikube-ensure:
+	@if minikube status >/dev/null 2>&1; then \
+		echo "→ Minikube is already running"; \
+	else \
+		echo "→ Starting Minikube…"; \
+		minikube start; \
+	fi
+
+.PHONY: demo-up
+demo-up: _preflight-demo
+	$(eval _TAG     := $(shell date +%Y%m%d-%H%M))
+	$(eval _API_KEY := $(or $(OPENAI_API_KEY),$(shell grep '^OPENAI_API_KEY=' .env 2>/dev/null | cut -d= -f2)))
 	@echo "═══════════════════════════════════════════════════"
-	@echo "  Full Minikube deployment — intelligent-triage-agent"
+	@echo "  Demo environment — intelligent-triage-agent"
 	@echo "  Image tag : $(_TAG)"
 	@echo "  API key   : $$(echo $(_API_KEY) | cut -c1-14)..."
 	@echo "═══════════════════════════════════════════════════"
 	@echo ""
-	@echo "Step 1/5: Enable Minikube addons (ingress + metrics-server)…"
+	@echo "Step 1/8: Ensure Minikube is running + addons…"
+	$(MAKE) minikube-ensure
 	$(MAKE) minikube-setup
 	@echo ""
-	@echo "Step 2/5: Build container image [$(IMAGE_NAME):$(_TAG)]…"
+	@echo "Step 2/8: Build container image [$(IMAGE_NAME):$(_TAG)]…"
 	sudo --preserve-env=OPENAI_API_KEY $(MAKE) build CONTAINER_TOOL=$(CONTAINER_TOOL) IMAGE_TAG=$(_TAG)
 	@echo ""
-	@echo "Step 3/5: Load image into Minikube…"
+	@echo "Step 3/8: Load image into Minikube…"
 	sudo rm -f /tmp/triage-agent.tar
 	$(MAKE) minikube-load-sudo IMAGE_TAG=$(_TAG)
 	@echo ""
-	@echo "Step 4/5: Deploy all Kubernetes manifests…"
+	@echo "Step 4/8: Deploy agent (RBAC + manifests)…"
 	$(MAKE) k8s-apply OPENAI_API_KEY=$(_API_KEY)
-	@echo "→ Uploading knowledge base docs to ConfigMap…"
+	$(MAKE) k8s-hpa-freeze-demo
+	@echo "→ Uploading knowledge base docs…"
 	$(MAKE) k8s-kb
-	@echo "→ Updating deployment to use image: localhost/$(IMAGE_NAME):$(_TAG)…"
+	@echo "→ Pinning image localhost/$(IMAGE_NAME):$(_TAG)…"
 	kubectl set image deployment/triage-agent triage-agent=localhost/$(IMAGE_NAME):$(_TAG) -n $(NAMESPACE)
 	kubectl rollout status deployment/triage-agent -n $(NAMESPACE) --timeout=180s
 	@echo ""
-	@echo "Step 5/5: Set default namespace + show status…"
+	@echo "Step 5/8: Apply demo incident workloads (labeled namespace)…"
+	$(MAKE) demo-apply
+	@echo ""
+	@echo "Step 6/8: Sync namespace-scoped RoleBindings + allowlist…"
+	$(MAKE) k8s-sync-access
+	@echo ""
+	@echo "Step 7/8: Wait for demo pods to settle…"
+	@kubectl wait --for=jsonpath='{.status.phase}'=Running pod -n triage-demo --field-selector=status.phase=Running \
+		--timeout=30s 2>/dev/null || \
+		echo "  (demo pods may include CrashLoop/OOM by design — inspect with kubectl get pods -n triage-demo)"
+	@echo ""
+	@echo "Step 8/8: Status…"
 	kubectl config set-context --current --namespace=triage-agent
 	$(MAKE) k8s-status
 	@echo ""
 	@echo "═══════════════════════════════════════════════════"
-	@echo "  Deployment complete! Image: $(IMAGE_NAME):$(_TAG)"
-	@echo "  Run in a separate terminal: make k8s-forward"
-	@echo "  Then test:                  make smoke-test"
+	@echo "  Demo ready. Validation (separate terminals):"
+	@echo "    make k8s-hpa-unfreeze     # restore CPU/memory autoscaling (2–10 replicas)"
+	@echo "    make k8s-forward          # port 8080"
+	@echo "    make smoke-test-all       # all POST /triage demo scenarios"
+	@echo "    kubectl get pods -n triage-demo"
+	@echo "    kubectl logs -n triage-agent -l app=triage-agent --tail=30 | grep -i mcp"
 	@echo "═══════════════════════════════════════════════════"
 
-# ── Smoke test ────────────────────────────────────────────────────────────────
-.PHONY: smoke-test
-smoke-test:
-	@echo "→ Sending test request to http://localhost:$(PORT)/triage…"
-	curl -s -X POST http://localhost:$(PORT)/triage \
-		-H "Content-Type: application/json" \
-		-d '{"500": "DB connection refused to postgres:5432"}' \
-		| python3 -m json.tool
+.PHONY: deploy-minikube
+deploy-minikube: demo-up
+	@echo "(deploy-minikube → demo-up)"
+
+# ── Smoke tests ───────────────────────────────────────────────────────────────
+.PHONY: smoke-test-all
+smoke-test-all:
+	@chmod +x scripts/smoke-triage.sh
+	@PORT=$(PORT) scripts/smoke-triage.sh
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 .PHONY: clean

@@ -29,6 +29,7 @@ from prometheus_fastapi_instrumentator import Instrumentator
 from app.config import settings
 from app.models import HealthResponse, ReadinessResponse, TriageRequest, TriageResponse
 from app.agent import run_triage
+from app.mcp.hub import McpHub
 
 # ── Logging setup ─────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -40,13 +41,33 @@ logger = logging.getLogger(__name__)
 # ── FastAPI lifespan: shared OpenAI client ────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Create shared OpenAI client once at startup (connection pooling, timeout set)."""
+    """Create shared OpenAI client and MCP hub once at startup."""
     app.state.openai_client = openai_lib.AsyncOpenAI(
         api_key=settings.openai_api_key,
         timeout=30.0,  # prevents indefinite hangs if OpenAI is slow/down
     )
     logger.info("OpenAI client initialised (model=%s, timeout=30s)", settings.openai_model)
+
+    mcp_hub = McpHub()
+    await mcp_hub.start()
+    app.state.mcp_hub = mcp_hub
+    if mcp_hub.kb_available:
+        logger.info("KB MCP server connected (stdio)")
+    else:
+        logger.warning("KB MCP server not connected — in-process KB fallback active")
+
+    if settings.k8s_mcp_enabled:
+        if mcp_hub.k8s_available:
+            logger.info("Kubernetes MCP connected (in-cluster, read-only)")
+        else:
+            logger.warning(
+                "Kubernetes MCP enabled but unavailable (%s)",
+                mcp_hub.k8s_error or "not connected",
+            )
+
     yield
+
+    await mcp_hub.stop()
     await app.state.openai_client.close()
     logger.info("OpenAI client closed")
 
@@ -117,8 +138,11 @@ async def readiness(request: Request):
     """
     try:
         client = request.app.state.openai_client
-        # list models is the lightest possible API call — no token cost, just auth validation
-        await client.models.list()
+        # Lightest auth check — use raw response so we do not parse paginated Model objects.
+        # openai<1.65 + pydantic>=2.11 breaks models.list() parsing (__pydantic_private__).
+        response = await client.models.with_raw_response.list()
+        if response.status_code != 200:
+            raise RuntimeError(f"OpenAI models API returned HTTP {response.status_code}")
         return ReadinessResponse(
             status="ready",
             openai_reachable=True,
@@ -163,7 +187,7 @@ async def triage(body: TriageRequest, request: Request):
     ```
 
     Responses:
-      200: Successful triage analysis
+      200: Successful triage analysis (includes evidence_sources: KB/K8s MCP usage)
       400: Input rejected by content moderation
       422: Invalid request format (wrong error code, empty description, etc.)
       500: Agent internal error
@@ -182,6 +206,7 @@ async def triage(body: TriageRequest, request: Request):
             error_code=error_code,
             description=description,
             client=request.app.state.openai_client,
+            mcp_hub=request.app.state.mcp_hub,
         )
     except HTTPException:
         raise

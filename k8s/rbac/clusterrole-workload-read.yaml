@@ -1,0 +1,15 @@
+# Read-only workload inspection — bound per opted-in namespace via RoleBinding (not cluster-wide).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: triage-agent-workload-read
+  labels:
+    app.kubernetes.io/name: triage-agent
+    app.kubernetes.io/component: rbac
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "events", "services", "configmaps"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["get", "list", "watch"]

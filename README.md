@@ -11,16 +11,16 @@
 **Prerequisites:** Python 3.12, Podman or Docker, Minikube, kubectl, OpenAI API key.
 
 ```bash
-# Put your key in .env — deploy-minikube reads it automatically:
+# Put your key in .env — demo-up reads it automatically:
 echo "OPENAI_API_KEY=sk-your-key" >> .env
 
-make deploy-minikube
+make demo-up
 
 # In a separate terminal:
 make k8s-forward
 
-# Test it:
-make smoke-test
+# Test it (all demo scenarios in one pass):
+make smoke-test-all
 ```
 
 > **Image tagging:** every build is tagged with a timestamp (`YYYYMMDD-HHMM`). To verify
@@ -74,7 +74,11 @@ Response:
 
 The agent uses **OpenAI tool-calling** (function calling) to autonomously decide when to query
 the Company Troubleshooting Knowledge Base before forming its conclusion — mimicking the reasoning
-pattern of a real SRE. See [ARCHITECTURE.md](./ARCHITECTURE.md) for design details.
+pattern of a real SRE. The KB is exposed via a **stdio MCP server** in the same container (not a
+separate pod). In Minikube, **hardened in-cluster Kubernetes MCP** runs in the same pod (Python
+stdio server + namespace-scoped RBAC + `triage.agent-accessible` label opt-in). See
+[ARCHITECTURE.md](./ARCHITECTURE.md), [k8s/rbac/README.md](./k8s/rbac/README.md), and
+[k8s/demo/README.md](./k8s/demo/README.md).
 
 ---
 
@@ -85,8 +89,11 @@ intelligent-triage-agent/
 ├── app/
 │   ├── __init__.py         # package marker
 │   ├── main.py             # FastAPI app, endpoints, middleware, HTML UI
-│   ├── agent.py            # LLM reasoning loop (tool-calling agent)
-│   ├── tools.py            # Mock KB tool + OpenAI tool schema
+│   ├── agent.py            # LLM reasoning loop (MCP-backed tools)
+│   ├── kb/search.py        # KB domain logic (JSON matching)
+│   ├── mcp/                # Stdio MCP client hub
+│   ├── tools.py            # Re-exports KB schema (compat)
+│   mcp_servers/kb_server.py  # KB MCP server (stdio, same container)
 │   ├── models.py           # Pydantic request/response models
 │   └── config.py           # Settings loaded from env vars / .env
 ├── data/

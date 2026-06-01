@@ -52,35 +52,36 @@ make run
 # → HTML UI at http://localhost:8080
 
 # 6. Test it (in a new terminal)
-make smoke-test
+make smoke-test-all
 ```
 
 ---
 
 ## Quick Start — Kubernetes (Minikube)
 
-### One-command deploy
+### One-command demo (`make demo-up`)
 
 ```bash
-# Option A — key already in .env (deploy-minikube reads it automatically):
-make deploy-minikube
+# Option A — key already in .env:
+make demo-up
 
-# Option B — pass the key as an env var instead:
+# Option B — pass the key as an env var:
 export OPENAI_API_KEY=sk-your-key
-make deploy-minikube
+make demo-up
 ```
 
-`make deploy-minikube` is **fully idempotent** — safe to run on first deploy or re-deploy.
+`make demo-up` is **idempotent** — starts Minikube if needed, deploys the agent with hardened in-cluster K8s MCP, applies demo workloads, and syncs namespace-scoped RBAC. `make deploy-minikube` is an alias.
 
-#### What deploy-minikube does (5 steps)
+#### What demo-up does (8 steps)
 
 | Step | What happens |
 |---|---|
-| 1/5 | Enables Minikube addons (ingress + metrics-server) via `make minikube-setup` |
-| 2/5 | Builds container image tagged `YYYYMMDD-HHMM` (timestamp computed once, used throughout) |
-| 3/5 | Saves image to `/tmp/triage-agent.tar` and loads into Minikube via `minikube image load` (file-based — more reliable than pipe) |
-| 4/5 | Applies all K8s manifests via `make k8s-apply` (never touches `secret.yaml` — the real secret is always managed by `make k8s-secret`) and uploads the real KB docs via `make k8s-kb` |
-| 5/5 | Patches the Deployment to the new timestamp image, waits for rollout, sets default namespace, prints status |
+| 1/8 | Preflight + start Minikube if stopped + `make minikube-setup` |
+| 2–3/8 | Build image (`YYYYMMDD-HHMM`) and load into Minikube |
+| 4/8 | `make k8s-apply` (RBAC + agent manifests + secret) + pin HPA to 2 replicas + `make k8s-kb` + pin image |
+| 5/8 | `make demo-apply` — `triage-demo` namespace with opt-in label |
+| 6/8 | `make k8s-sync-access` — RoleBindings in labeled namespaces + allowlist ConfigMap |
+| 7–8/8 | Wait for workloads, print status and validation hints |
 
 **Verify which build is deployed:**
 
@@ -89,9 +90,11 @@ kubectl get pods -o jsonpath='{.items[0].spec.containers[0].image}'
 # e.g. → localhost/intelligent-triage-agent:20260531-1842
 ```
 
-> **KB gotcha:** `configmap.yaml` in the repo has placeholder (empty) KB entries. `make deploy-minikube`
+> **KB gotcha:** `configmap.yaml` in the repo has placeholder (empty) KB entries. `make demo-up`
 > automatically runs `make k8s-kb` to upload the real `data/troubleshooting_docs.json`. If you see
 > `"Loaded 0 entries"` in pod logs, the ConfigMap is still empty — run `make k8s-kb` manually.
+
+> **HPA during demo:** `make demo-up` applies `k8s/hpa.yaml` then patches the HPA to `minReplicas=maxReplicas=2` so setup rollouts do not scale. The HPA object stays in the cluster. Restore CPU/memory autoscaling with `make k8s-hpa-unfreeze` (re-applies `hpa.yaml`, min 2 / max 10). `make k8s-apply` alone does not freeze the HPA.
 
 For manual step-by-step control, read on.
 
@@ -145,7 +148,7 @@ make k8s-forward
 # → http://localhost:8080 now reaches the cluster pod
 
 # 6. Smoke test
-make smoke-test
+make smoke-test-all
 
 # 7. Verify HPA is active (needs metrics-server from make minikube-setup)
 kubectl get hpa -n triage-agent
@@ -225,7 +228,8 @@ curl -X POST http://<route-hostname>/triage \
 
 | Command | Description |
 |---|---|
-| `make deploy-minikube` | Full Minikube deploy in one command (setup → build → load → apply → status) |
+| `make demo-up` | Full Minikube demo (agent + RBAC + demo workloads) |
+| `make deploy-minikube` | Alias for `make demo-up` |
 | `make minikube-setup` | Enable required Minikube addons (ingress + metrics-server) — run once |
 | `make minikube-load` | Save + load image into Minikube (Podman-compatible) |
 | `make minikube-load-sudo` | Load image using `sudo podman` — use when image was built with sudo |
@@ -234,6 +238,7 @@ curl -X POST http://<route-hostname>/triage \
 | `make k8s-kb` | Update the knowledge-base ConfigMap from local JSON |
 | `make k8s-restart` | Rolling-restart the Deployment |
 | `make k8s-status` | Show pod / deployment / HPA status |
+| `make k8s-hpa-unfreeze` | Restore HPA autoscaling after demo (`kubectl apply -f k8s/hpa.yaml`) |
 | `make k8s-logs` | Tail logs from all pods |
 | `make k8s-delete` | Delete all resources in the namespace |
 | `make k8s-forward` | Port-forward the service to `localhost:8080` |
@@ -242,7 +247,7 @@ curl -X POST http://<route-hostname>/triage \
 
 | Command | Description |
 |---|---|
-| `make smoke-test` | POST a sample error log to the running service |
+| `make smoke-test-all` | Run all POST `/triage` demo scenarios (KB, K8s, invalid input) in one pass |
 | `make clean` | Remove build artefacts and `.venv` |
 
 **Variables** (override on CLI or in env):
@@ -329,8 +334,13 @@ All settings are read from environment variables (or `.env` locally).
 | `OPENAI_API_KEY` | *(required)* | OpenAI secret key. In K8s, sourced from the Secret. |
 | `OPENAI_MODEL` | `gpt-4o-mini` | Model name. Swap to `gpt-4o` for higher accuracy. |
 | `LLM_MAX_TOKENS` | `1024` | Max tokens per LLM response. |
-| `AGENT_MAX_ITERATIONS` | `3` | Max tool-call rounds per single request (NOT concurrent request limit). Prevents infinite reasoning loops. FastAPI handles concurrency via async. Default 3 is conservative — agent finishes in 2 rounds in practice. |
+| `AGENT_MAX_ITERATIONS` | `4` | Max agent loop steps per request (NOT concurrent request limit). Iteration 0 requires KB; middle steps may call K8s MCP; the last step is synthesis-only (no tools). Default 4 allows KB + up to two evidence rounds + a final answer without unbounded tool loops. |
 | `DOCS_FILE_PATH` | `data/troubleshooting_docs.json` | Path to the KB JSON file. |
+| `MCP_KB_ENABLED` | `true` | Spawn KB MCP server over stdio (same pod). |
+| `K8S_MCP_ENABLED` | `false` (true in cluster ConfigMap) | Spawn Python `mcp_servers.k8s_server` (in-cluster SA). |
+| `K8S_ACCESS_ALLOWLIST` | *(empty)* | Comma-separated namespaces; patched by `make k8s-sync-access`. |
+| `K8S_ACCESS_LABEL_KEY` | `triage.agent-accessible` | Namespace opt-in label key. |
+| `K8S_MCP_KUBECONFIG` | *(empty)* | Local dev only; pod uses in-cluster config. |
 | `APP_PORT` | `8080` | Port the uvicorn server binds to. |
 | `LOG_LEVEL` | `info` | Logging verbosity (`debug`, `info`, `warning`, `error`). |
 | `LLM_TEMPERATURE` | `0.2` | LLM output randomness. 0.0=deterministic/no hallucinations, 2.0=very creative. Keep at 0.0–0.3 for reproducible triage. |
@@ -355,6 +365,53 @@ make k8s-kb
 ```
 
 The rolling restart replaces pods one at a time (maxUnavailable: 0), so there is zero downtime during the update.
+
+---
+
+## MCP architecture
+
+| Component | Role |
+|---|---|
+| `mcp_servers/kb_server.py` | Stdio MCP server exposing `get_troubleshooting_docs` |
+| `app/kb/search.py` | Domain logic (JSON matching) — used by the MCP server |
+| `app/mcp/hub.py` | Spawns MCP subprocesses, routes tool calls, OpenAI schema bridge |
+
+The KB MCP process is **not** a separate Kubernetes Deployment — it is spawned by the app inside the same container.
+
+If the KB MCP subprocess fails to start, the hub falls back to in-process `get_troubleshooting_docs` so triage still works.
+
+### Kubernetes MCP (hardened in-cluster)
+
+Minikube demo path (`make demo-up`):
+
+1. **Label opt-in** — `triage.agent-accessible=true` on `triage-demo` (and any other demo namespace).
+2. **RBAC** — `ClusterRole` + per-namespace `RoleBinding` (no cluster-wide pod list). Narrow `ClusterRole` for namespace metadata discovery only. See [k8s/rbac/README.md](./k8s/rbac/README.md).
+3. **Defense in depth** — `mcp_servers/k8s_server.py` and `app/mcp/hub.py` refuse tools outside `K8S_ACCESS_ALLOWLIST`.
+
+Read-only tools: `list_accessible_namespaces`, `list_pods`, `get_pod_logs`, `list_events`, `get_deployment_status`, `list_services`. No write/exec.
+
+Local dev (optional): `K8S_MCP_ENABLED=true` with `K8S_MCP_KUBECONFIG` and `K8S_ACCESS_ALLOWLIST=triage-demo`.
+
+Reference: [config/mcp_servers.example.json](./config/mcp_servers.example.json).
+
+---
+
+## Demo incident workloads (`triage-demo`)
+
+Included in `make demo-up`. Manual apply:
+
+```bash
+make demo-apply && make k8s-sync-access
+kubectl get pods -n triage-demo
+```
+
+| Scenario | Label | Expected signal |
+|---|---|---|
+| Missing config | `triage.demo/scenario=crashloop-missing-config` | `CrashLoopBackOff`, exit log about `REQUIRED_CONFIG` |
+| OOM | `triage.demo/scenario=oom-low-limit` | `OOMKilled`, 48Mi limit |
+| Wrong DB host | `triage.demo/scenario=db-wrong-host` | Logs: `postgres-wrong...` DNS failure |
+
+Details: [k8s/demo/README.md](./k8s/demo/README.md). Remove with `make demo-delete`.
 
 ---
 

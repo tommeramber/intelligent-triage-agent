@@ -68,6 +68,24 @@ class TriageRequest(RootModel[Dict[str, str]]):
         return next(iter(self.root.values()))
 
 
+class EvidenceSources(BaseModel):
+    """
+    Which tool backends contributed to the answer (for demos and smoke tests).
+
+    knowledge_base is set when the KB tool ran (always on successful triage).
+    kubernetes lists K8s MCP tool names when cluster evidence was gathered.
+    """
+
+    knowledge_base: str | None = Field(
+        default=None,
+        description="KB channel: mcp | in_process_fallback",
+    )
+    kubernetes: List[str] = Field(
+        default_factory=list,
+        description="Kubernetes MCP tools invoked (empty if none).",
+    )
+
+
 class TriageResponse(BaseModel):
     """Structured analysis the agent returns after reasoning over the error."""
 
@@ -96,6 +114,11 @@ class TriageResponse(BaseModel):
     raw_error: str = Field(
         ...,
         description="Echo of the original error as '{error_code}: {description}'",
+    )
+
+    evidence_sources: EvidenceSources = Field(
+        default_factory=EvidenceSources,
+        description="MCP / fallback backends used while building this answer.",
     )
 
 

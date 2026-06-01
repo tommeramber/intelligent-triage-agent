@@ -285,7 +285,7 @@ make k8s-status
 # Forward the service port to your laptop
 make k8s-forward
 # In another terminal:
-make smoke-test       # sends a test error log and prints the JSON response
+make smoke-test-all   # runs all POST /triage demo scenarios (payload, response, MCP/tools per case)
 ```
 
 ### Updating the Knowledge Base Without Rebuilding
@@ -368,7 +368,7 @@ The HPA scales at 60% CPU average, giving headroom before throttling.
 Before submitting or presenting:
 
 - [ ] `make install && make run` starts cleanly
-- [ ] `make smoke-test` returns a valid JSON response
+- [ ] `make smoke-test-all` reports 3/3 scenarios passed
 - [ ] `make test` all tests pass
 - [ ] `make build` produces a working Docker image
 - [ ] `make k8s-apply && make k8s-status` shows pods Running
